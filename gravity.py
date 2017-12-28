@@ -48,9 +48,47 @@ class Gravity:
 
         return self.observe(), reward, game_over
 
-
     def reset(self):   # if game finishes, reset
         self.__init__(self.size)
+
+
+class ExperienceReplay():
+    def __init__(self, max_memory, discount):
+        self.max_memory = max_memory
+        self.memory = list()
+        self.discount = discount
+
+    def remember(self, states, game_over):   # remember what we've done
+        self.memory.append([states, game_over])
+
+        if len(self.memory) > self.max_memory:  # don't store too much
+            del self.memory[0]  # delete oldest one
+
+    def get_batch(self, model, batch_size):  # return a batch of inputs to NN and target outputs, and train NN using sgd
+        len_memory = len(self.memory)
+
+        num_actions = model.output_shape[-1]
+        env_dim = self.memory[0][0][0].shape[1]
+        inputs = np.zeros((min(len_memory, batch_size), env_dim))  # inputs to NN
+        targets = np.zeros((inputs.shape[0], num_actions))
+
+        # pick random number of memories
+        for i, idx in enumerate(np.random.randint(0, len_memory, size=inputs.shape[0])):
+            state_t, action_t, reward_t, state_tp1 = self.memory[idx][0]
+            game_over = self.memory[idx][1]
+
+            inputs[i:i+1] = state_t
+            targets[i] = model.predict(state_t)[0] # set to prediction
+            Q_sa = np.max(model.predict(state_tp1)[0])   # highest value that NN predicts for next
+
+            if game_over:
+                targets[i, action_t] = reward_t   # if game_over, we already know what reward is, set target result for move we took exactly
+            else:
+                # have to consider max reward in future, with temporal discounting
+                targets[i, action_t] = reward_t + self.discount * Q_sa   # reward
+
+        return inputs, targets
+
 
 if __name__ == '__main__':
     # define some important constants (hyperparameters)
@@ -75,6 +113,8 @@ if __name__ == '__main__':
 
     BATCH_SIZE = 50     # 50 examples at a time
     EPOCHS = 1000       # extent of training, number of iterations
+    MAX_MEMORY = 500
+    DISCOUNT = 0.9
 
     model = Sequential()    # feedforward
 
@@ -103,8 +143,11 @@ if __name__ == '__main__':
     # set up environment
     env = Gravity(GRID_DIM)
 
+    replay = ExperienceReplay(MAX_MEMORY, DISCOUNT)
+
     win_cnt = 0
     for epoch in range(EPOCHS):
+        loss = 0
         env.reset()
         game_over = False
         input_t = env.observe()
@@ -115,8 +158,7 @@ if __name__ == '__main__':
             if random.random() <= EPSILON:  # randomly explore
                 action = random.randint(0, 2)
             else:
-                # take what model thinks
-                q = model.predict(input_tm1)  # 3 probabilities for confidence for each move, choose most confident one
+                q = model.predict(input_tm1)  # feed in input, get network's prediction, and take that action
                 action = np.argmax(q[0])
 
             input_t, reward, game_over = env.act(action)
@@ -124,13 +166,16 @@ if __name__ == '__main__':
             if reward == 1:
                 win_cnt += 1
 
-        print("Epoch: {:06d}/{:06d} | win count {}".format(epoch, EPOCHS, win_cnt))
+            replay.remember([input_tm1, action, reward, input_t], game_over)
+            inputs, targets = replay.get_batch(model, BATCH_SIZE)    # get mini batch
+            # now we get our loss from our model
+            loss += model.train_on_batch(inputs, targets)
+
+        print("Epoch: {:06d}/{:06d} | Loss {:.4f} | win count {}".format(epoch, EPOCHS, loss,  win_cnt))
 
         # save model weights
-        model.save_weights("model.h5", overwrite=True)
+        model.save_weights("trained.h5", overwrite=True)
 
         # store network structure
         with open("model.json", "w") as outfile:
             json.dump(model.to_json(), outfile)
-
-# performance is at chance level at the moment as the network is not actually being trained! need to use reward to train it
